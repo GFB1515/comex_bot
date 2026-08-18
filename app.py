@@ -177,13 +177,15 @@ if consult:
     if "FOB (US$)" in df.columns and "Kg líquido" in df.columns:
         total_fob = df["FOB (US$)"].sum(skipna=True)
         total_kg = df["Kg líquido"].sum(skipna=True)
+        total_kg_dividido = total_kg / 23000
         avg = (total_fob / total_kg * 1000) if total_kg else None
 
         a,b,c = st.columns(3)
         a.metric("FOB total", f"US$ {total_fob:,.2f}".replace(",", "X").replace(".", ",").replace("X","."))
-        b.metric("Kg líquido", f"{total_kg:,.2f}".replace(",", "X").replace(".", ",").replace("X","."))
+        b.metric("Kg líquido", f"{total_kg_dividido:,.2f}".replace(",", "X").replace(".", ",").replace("X","."))
         c.metric("US$/ton", "—" if avg is None else f"US$ {avg:,.4f}".replace(",", "X").replace(".", ",").replace("X","."))
 
+    df["Kg líquido"] = df["Kg líquido"] / 23000
     st.dataframe(df, use_container_width=True, hide_index=True)
 
     csv = df.to_csv(index=False).encode("utf-8-sig")
