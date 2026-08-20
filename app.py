@@ -235,19 +235,14 @@ try:
     city_df = cities()
 
 except Exception as e:
-
-    st.error(
-        f"Não consegui carregar a tabela de municípios: {e}"
-    )
-
-    st.stop()
-
-
-# =========================================================
-# CARREGAR PAÍSES
-# =========================================================
-
 try:
+    city_df = cities()
+
+except Exception as e:
+    st.warning(
+        f"Não foi possível carregar a lista de municípios agora: {e}"
+    )
+    city_df = pd.DataFrame()
 
     country_df = countries()
 
