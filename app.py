@@ -229,12 +229,7 @@ def normalize_result(j):
 # =========================================================
 # CARREGAR MUNICÍPIOS
 # =========================================================
-
-try:
-
-    city_df = cities()
-
-except Exception as e:
+    
 try:
     city_df = cities()
 
@@ -244,14 +239,14 @@ except Exception as e:
     )
     city_df = pd.DataFrame()
 
+
+try:
     country_df = countries()
 
 except Exception:
-
     country_df = pd.DataFrame(
         columns=["id", "text"]
     )
-
 
 # =========================================================
 # SIDEBAR
