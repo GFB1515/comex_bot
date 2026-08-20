@@ -3,13 +3,12 @@ import pandas as pd
 import streamlit as st
 from datetime import date
 
+# ==========================================================
+# COMEX STAT - API OFICIAL MDIC
+# ==========================================================
 
-BASE = "https://api-comexstat.mdic.gov.br"
-
-
-# =========================================================
-# CONFIGURAÇÃO
-# =========================================================
+BASE_URL = "https://api-comexstat.mdic.gov.br"
+PESO_CONTAINER = 23000
 
 st.set_page_config(
     page_title="Comex Bot",
@@ -18,471 +17,489 @@ st.set_page_config(
 )
 
 st.title("📊 Comex Bot — Exportações por Município")
+
 st.caption(
-    "Consulta a API oficial do Comex Stat/MDIC "
-    "e calcula automaticamente US$/kg, US$/ton e contêineres."
+    "Consulta diretamente a API oficial do Comex Stat/MDIC."
 )
 
 
-# =========================================================
-# FUNÇÃO PARA CONSULTAR API
-# =========================================================
+# ==========================================================
+# FUNÇÃO PARA CHAMAR A API
+# ==========================================================
 
-@st.cache_data(ttl=86400)
-def get_json(path, params=None):
-    r = requests.get(
-        BASE + path,
-        params=params,
+def api_get(endpoint):
+    response = requests.get(
+        f"{BASE_URL}{endpoint}",
         timeout=60
     )
 
-    r.raise_for_status()
+    response.raise_for_status()
 
-    return r.json()
+    data = response.json()
+
+    if data.get("success") is False:
+        raise Exception(
+            data.get("message", "Erro na API")
+        )
+
+    return data
 
 
-# =========================================================
+# ==========================================================
 # MUNICÍPIOS
-# =========================================================
+# API OFICIAL:
+# /tables/cities
+# ==========================================================
 
 @st.cache_data(ttl=86400)
-def cities():
+def carregar_municipios():
 
-    j = get_json("/tables/cities")
-
-    return pd.DataFrame(
-        j.get("data", [])
+    data = api_get(
+        "/tables/cities"
     )
 
+    lista = data.get(
+        "data",
+        []
+    )
 
-# =========================================================
+    df = pd.DataFrame(lista)
+
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "id",
+                "text"
+            ]
+        )
+
+    return df[
+        [
+            "id",
+            "text"
+        ]
+    ].copy()
+
+
+# ==========================================================
 # PAÍSES
-# =========================================================
+# API OFICIAL:
+# /cities/filters/country
+# ==========================================================
 
 @st.cache_data(ttl=86400)
-def countries():
+def carregar_paises():
 
-    j = get_json(
-        "/general/filters/country",
-        {"language": "pt"}
+    data = api_get(
+        "/cities/filters/country?language=pt"
     )
 
-    data = j.get("data", [])
-
-    rows = []
-
-    def walk(x):
-
-        if isinstance(x, dict):
-
-            if "id" in x and "text" in x:
-
-                rows.append({
-                    "id": str(x["id"]),
-                    "text": str(x["text"])
-                })
-
-            else:
-
-                for y in x.values():
-                    walk(y)
-
-        elif isinstance(x, list):
-
-            for y in x:
-                walk(y)
-
-    walk(data)
-
-    return pd.DataFrame(rows).drop_duplicates("id")
-
-
-# =========================================================
-# CONSULTA PRINCIPAL
-# =========================================================
-
-@st.cache_data(ttl=86400)
-def query_api(payload):
-
-    r = requests.post(
-        BASE + "/cities?language=pt",
-        json=payload,
-        headers={
-            "Content-Type": "application/json"
-        },
-        timeout=180
+    valores = data.get(
+        "data",
+        []
     )
 
-    r.raise_for_status()
+    # A API pode retornar listas dentro de listas
+    lista = []
 
-    j = r.json()
+    def extrair(obj):
 
-    if not j.get("success", True):
+        if isinstance(obj, list):
 
-        raise RuntimeError(
-            j.get("message")
-            or "A API retornou erro."
+            for item in obj:
+                extrair(item)
+
+        elif isinstance(obj, dict):
+
+            if (
+                "id" in obj
+                and "text" in obj
+            ):
+                lista.append(obj)
+
+    extrair(valores)
+
+    if not lista:
+
+        return pd.DataFrame(
+            columns=[
+                "id",
+                "text"
+            ]
         )
 
-    return j
-
-
-# =========================================================
-# NORMALIZAR RESULTADO
-# =========================================================
-
-def normalize_result(j):
-
-    data = j.get("data", {})
-
-    rows = (
-        data.get("list", [])
-        if isinstance(data, dict)
-        else data
+    df = pd.DataFrame(
+        lista
     )
 
-    if not rows:
-
-        return pd.DataFrame()
-
-    df = pd.json_normalize(rows)
-
-    rename = {
-
-        "year": "Ano",
-        "month": "Mês",
-        "country": "País",
-        "city": "Município",
-        "state": "UF",
-        "heading": "SH4",
-        "sh4": "SH4",
-
-        "metricFOB": "FOB (US$)",
-        "metricKG": "Kg líquido",
-
-        "fob": "FOB (US$)",
-        "kg": "Kg líquido",
-    }
-
-    df = df.rename(columns=rename)
-
-    # Procurar FOB caso venha com outro nome
-    for c in df.columns:
-
-        lc = str(c).lower()
-
-        if (
-            "fob" in lc
-            and "FOB (US$)" not in df.columns
-        ):
-
-            df["FOB (US$)"] = pd.to_numeric(
-                df[c],
-                errors="coerce"
-            )
-
-        if (
-            ("kg" in lc or "quilograma" in lc)
-            and "Kg líquido" not in df.columns
-        ):
-
-            df["Kg líquido"] = pd.to_numeric(
-                df[c],
-                errors="coerce"
-            )
-
-    # Converter valores para número
-    if "FOB (US$)" in df.columns:
-
-        df["FOB (US$)"] = pd.to_numeric(
-            df["FOB (US$)"],
-            errors="coerce"
-        )
-
-    if "Kg líquido" in df.columns:
-
-        df["Kg líquido"] = pd.to_numeric(
-            df["Kg líquido"],
-            errors="coerce"
-        )
-
-    # =====================================================
-    # US$/TON
-    # =====================================================
-
-    if (
-        "FOB (US$)" in df.columns
-        and "Kg líquido" in df.columns
-    ):
-
-        kg = df["Kg líquido"].replace(0, pd.NA)
-
-        df["US$/ton"] = (
-            df["FOB (US$)"]
-            .div(kg)
-            * 1000
-        )
-
-    return df
+    return df.drop_duplicates(
+        subset=["id"]
+    )
 
 
-# =========================================================
+# ==========================================================
 # CARREGAR MUNICÍPIOS
-# =========================================================
-    
-try:
-    city_df = cities()
+# ==========================================================
 
-except Exception as e:
+try:
+
+    municipios = carregar_municipios()
+
+except Exception as erro:
+
+    municipios = pd.DataFrame(
+        columns=[
+            "id",
+            "text"
+        ]
+    )
+
     st.warning(
-        f"Não foi possível carregar a lista de municípios agora: {e}"
+        f"Não foi possível carregar os municípios: {erro}"
     )
-    city_df = pd.DataFrame()
 
+
+# ==========================================================
+# CARREGAR PAÍSES
+# ==========================================================
 
 try:
-    country_df = countries()
 
-except Exception:
-    country_df = pd.DataFrame(
-        columns=["id", "text"]
+    paises = carregar_paises()
+
+except Exception as erro:
+
+    paises = pd.DataFrame(
+        columns=[
+            "id",
+            "text"
+        ]
     )
 
-# =========================================================
+    st.warning(
+        f"Não foi possível carregar os países: {erro}"
+    )
+
+
+# ==========================================================
 # SIDEBAR
-# =========================================================
+# ==========================================================
 
-st.sidebar.header("🔎 Filtros")
+st.sidebar.header(
+    "🔎 Filtros da consulta"
+)
 
 
-c1, c2 = st.sidebar.columns(2)
+# ==========================================================
+# OPERAÇÃO
+# ==========================================================
 
-year_from = c1.number_input(
+operacao = st.sidebar.selectbox(
+    "Tipo de operação",
+    [
+        "Exportação",
+        "Importação"
+    ]
+)
+
+
+fluxo = (
+    "export"
+    if operacao == "Exportação"
+    else "import"
+)
+
+
+# ==========================================================
+# PERÍODO
+# ==========================================================
+
+hoje = date.today()
+
+col1, col2 = st.sidebar.columns(2)
+
+ano_inicio = col1.number_input(
     "Ano inicial",
-    1997,
-    date.today().year,
-    date.today().year
+    min_value=1997,
+    max_value=hoje.year,
+    value=hoje.year,
+    step=1
 )
 
-month_from = c2.number_input(
+mes_inicio = col2.number_input(
     "Mês inicial",
-    1,
-    12,
-    max(1, date.today().month - 1)
+    min_value=1,
+    max_value=12,
+    value=max(
+        1,
+        hoje.month - 1
+    ),
+    step=1
 )
 
 
-c3, c4 = st.sidebar.columns(2)
+col3, col4 = st.sidebar.columns(2)
 
-year_to = c3.number_input(
+ano_final = col3.number_input(
     "Ano final",
-    1997,
-    date.today().year,
-    date.today().year
+    min_value=1997,
+    max_value=hoje.year,
+    value=hoje.year,
+    step=1
 )
 
-month_to = c4.number_input(
+mes_final = col4.number_input(
     "Mês final",
-    1,
-    12,
-    max(1, date.today().month - 1)
+    min_value=1,
+    max_value=12,
+    value=max(
+        1,
+        hoje.month - 1
+    ),
+    step=1
 )
 
 
-# =========================================================
+# ==========================================================
+# VALIDAR PERÍODO
+# ==========================================================
+
+periodo_inicio = (
+    int(ano_inicio),
+    int(mes_inicio)
+)
+
+periodo_final = (
+    int(ano_final),
+    int(mes_final)
+)
+
+
+# ==========================================================
 # MUNICÍPIO
-# =========================================================
+# ==========================================================
 
-city_options = [
-    "Todos"
-] + sorted(
-    city_df
-    .get(
-        "text",
-        pd.Series(dtype=str)
+opcoes_municipios = [
+    "Todos os municípios"
+]
+
+if not municipios.empty:
+
+    opcoes_municipios += sorted(
+        municipios["text"]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
     )
-    .dropna()
-    .astype(str)
-    .tolist()
-)
 
 
-city = st.sidebar.selectbox(
+municipio_selecionado = st.sidebar.selectbox(
     "Município",
-    city_options
+    opcoes_municipios
 )
 
 
-# =========================================================
+# ==========================================================
 # PAÍS
-# =========================================================
+# ==========================================================
 
-country_options = ["Todos"]
+opcoes_paises = [
+    "Todos os países"
+]
 
-country_map = {}
+mapa_paises = {}
+
+if not paises.empty:
+
+    for _, linha in paises.iterrows():
+
+        nome = str(
+            linha["text"]
+        )
+
+        codigo = str(
+            linha["id"]
+        )
+
+        opcoes_paises.append(
+            nome
+        )
+
+        mapa_paises[
+            nome
+        ] = codigo
 
 
-if not country_df.empty:
-
-    for _, r in country_df.iterrows():
-
-        label = str(r["text"])
-
-        country_options.append(label)
-
-        country_map[label] = str(r["id"])
-
-
-country = st.sidebar.selectbox(
-    "País de destino",
-    country_options
+pais_selecionado = st.sidebar.selectbox(
+    "País",
+    opcoes_paises
 )
 
 
-# =========================================================
+# ==========================================================
 # SH4
-# =========================================================
+# ==========================================================
 
 sh4 = st.sidebar.text_input(
-    "Posição SH4",
+    "SH4",
     placeholder="Ex.: 4412"
-).strip()
+)
+
+sh4 = "".join(
+    c for c in sh4
+    if c.isdigit()
+)
 
 
-# =========================================================
+# ==========================================================
 # DETALHAMENTO
-# =========================================================
+# ==========================================================
 
-month_detail = st.sidebar.checkbox(
+detalhar_mes = st.sidebar.checkbox(
     "Detalhar mês a mês",
     value=True
 )
 
 
-# =========================================================
-# BOTÃO CONSULTAR
-# =========================================================
+# ==========================================================
+# BOTÃO
+# ==========================================================
 
-consult = st.sidebar.button(
+consultar = st.sidebar.button(
     "🔎 CONSULTAR",
     type="primary",
     use_container_width=True
 )
 
 
-# =========================================================
-# EXECUTAR CONSULTA
-# =========================================================
+# ==========================================================
+# CONSULTA
+# ==========================================================
 
-if consult:
+if consultar:
 
-    # -----------------------------------------------------
+    # ------------------------------------------------------
     # VALIDAR PERÍODO
-    # -----------------------------------------------------
+    # ------------------------------------------------------
 
-    if (year_from, month_from) > (year_to, month_to):
+    if periodo_inicio > periodo_final:
 
         st.error(
-            "O período inicial não pode ser maior que o final."
+            "O período inicial não pode ser maior "
+            "que o período final."
         )
 
         st.stop()
 
 
-    # -----------------------------------------------------
+    # ------------------------------------------------------
+    # VALIDAR SH4
+    # ------------------------------------------------------
+
+    if sh4 and len(sh4) != 4:
+
+        st.error(
+            "O SH4 deve possuir exatamente 4 dígitos."
+        )
+
+        st.stop()
+
+
+    # ------------------------------------------------------
     # FILTROS
-    # -----------------------------------------------------
+    # ------------------------------------------------------
 
-    filters = []
-
-
-    # País
-    if country != "Todos":
-
-        filters.append({
-            "filter": "country",
-            "values": [
-                country_map[country]
-            ]
-        })
+    filtros = []
 
 
-    # Município
-    if city != "Todos":
+    # MUNICÍPIO
+    if municipio_selecionado != "Todos os municípios":
 
-        city_rows = city_df[
-            city_df["text"]
-            .astype(str)
-            == city
+        municipio = municipios[
+            municipios["text"]
+            == municipio_selecionado
         ]
 
-        if city_rows.empty:
+        if municipio.empty:
 
             st.error(
-                "Não foi possível localizar o código do município."
+                "Município não encontrado."
             )
 
             st.stop()
 
-        row = city_rows.iloc[0]
 
-        city_id = str(row["id"])
+        codigo_municipio = str(
+            municipio.iloc[0]["id"]
+        )
 
-        filters.append({
-            "filter": "city",
-            "values": [city_id]
-        })
+        filtros.append(
+            {
+                "filter": "city",
+                "values": [
+                    codigo_municipio
+                ]
+            }
+        )
+
+
+    # PAÍS
+    if pais_selecionado != "Todos os países":
+
+        codigo_pais = mapa_paises[
+            pais_selecionado
+        ]
+
+        filtros.append(
+            {
+                "filter": "country",
+                "values": [
+                    codigo_pais
+                ]
+            }
+        )
 
 
     # SH4
     if sh4:
 
-        sh4_clean = "".join(
-            ch for ch in sh4
-            if ch.isdigit()
+        filtros.append(
+            {
+                "filter": "heading",
+                "values": [
+                    sh4
+                ]
+            }
         )
 
-        if len(sh4_clean) != 4:
 
-            st.error(
-                "Informe o SH4 com exatamente 4 dígitos."
-            )
-
-            st.stop()
-
-        filters.append({
-            "filter": "heading",
-            "values": [sh4_clean]
-        })
-
-
-    # -----------------------------------------------------
-    # PAYLOAD
-    # -----------------------------------------------------
+    # ------------------------------------------------------
+    # PAYLOAD OFICIAL
+    # ------------------------------------------------------
 
     payload = {
 
-        "flow": "export",
+        "flow": fluxo,
 
-        "monthDetail": month_detail,
+        "monthDetail": detalhar_mes,
 
         "period": {
 
-            "from": (
-                f"{int(year_from):04d}-"
-                f"{int(month_from):02d}"
-            ),
+            "from":
+                f"{int(ano_inicio):04d}-"
+                f"{int(mes_inicio):02d}",
 
-            "to": (
-                f"{int(year_to):04d}-"
-                f"{int(month_to):02d}"
-            )
+            "to":
+                f"{int(ano_final):04d}-"
+                f"{int(mes_final):02d}"
         },
 
-        "filters": filters,
+        "filters": filtros,
 
         "details": [
             "country",
+            "state",
             "city",
             "heading"
         ],
@@ -494,252 +511,320 @@ if consult:
     }
 
 
-    # -----------------------------------------------------
-    # CONSULTAR API
-    # -----------------------------------------------------
+    # ------------------------------------------------------
+    # MOSTRAR CONSULTA
+    # ------------------------------------------------------
 
-    with st.spinner(
-        "Consultando o Comex Stat..."
+    with st.expander(
+        "🔧 Consulta enviada para a API"
     ):
 
-        try:
+        st.json(
+            payload
+        )
 
-            result = query_api(payload)
 
-            df = normalize_result(result)
+    # ------------------------------------------------------
+    # POST API OFICIAL
+    # ------------------------------------------------------
 
-        except Exception as e:
+    try:
 
-            st.error(
-                f"Erro na consulta: {e}"
+        with st.spinner(
+            "Consultando o Comex Stat..."
+        ):
+
+            resposta = requests.post(
+
+                f"{BASE_URL}/cities?language=pt",
+
+                json=payload,
+
+                headers={
+                    "Content-Type":
+                        "application/json"
+                },
+
+                timeout=180
             )
 
-            st.stop()
+
+        resposta.raise_for_status()
+
+        resultado = resposta.json()
 
 
-    # -----------------------------------------------------
-    # VERIFICAR RESULTADO
-    # -----------------------------------------------------
-
-    if df.empty:
-
-        st.warning(
-            "Nenhum resultado encontrado com esses filtros."
-        )
-
-        st.stop()
-
-
-    # -----------------------------------------------------
-    # MENSAGEM DE SUCESSO
-    # -----------------------------------------------------
-
-    st.success(
-        f"{len(df):,} linhas retornadas."
-        .replace(",", ".")
-    )
-
-
-    # =====================================================
-    # CÁLCULOS
-    # =====================================================
-
-    if (
-        "FOB (US$)" not in df.columns
-        or "Kg líquido" not in df.columns
-    ):
+    except Exception as erro:
 
         st.error(
-            "A API não retornou as colunas "
-            "'FOB (US$)' e/ou 'Kg líquido'."
+            f"Erro ao consultar a API: {erro}"
         )
 
         st.stop()
 
 
-    # -----------------------------------------------------
-    # GARANTIR NÚMEROS
-    # -----------------------------------------------------
+    # ------------------------------------------------------
+    # VERIFICAR RESPOSTA
+    # ------------------------------------------------------
 
-    df["FOB (US$)"] = pd.to_numeric(
-        df["FOB (US$)"],
-        errors="coerce"
+    if resultado.get(
+        "success"
+    ) is False:
+
+        st.error(
+            resultado.get(
+                "message",
+                "A API retornou um erro."
+            )
+        )
+
+        st.stop()
+
+
+    dados = resultado.get(
+        "data",
+        {}
     )
 
-    df["Kg líquido"] = pd.to_numeric(
-        df["Kg líquido"],
-        errors="coerce"
-    )
-
-
-    # -----------------------------------------------------
-    # TOTAIS
-    # -----------------------------------------------------
-
-    total_fob = df["FOB (US$)"].sum(
-        skipna=True
-    )
-
-    total_kg = df["Kg líquido"].sum(
-        skipna=True
-    )
-
-
-    # =====================================================
-    # NOVA COLUNA CONTÊINER
-    # =====================================================
-
-    # Cada contêiner = 23.000 kg
-
-    df["Contêiner"] = (
-        df["Kg líquido"] / 23000
+    lista = dados.get(
+        "list",
+        []
     )
 
 
-    # =====================================================
-    # US$/TON
-    # =====================================================
+    if not lista:
 
-    if total_kg and total_kg > 0:
+        st.warning(
+            "A API não encontrou dados para "
+            "os filtros selecionados."
+        )
 
-        avg = (
-            total_fob
-            / total_kg
+        st.stop()
+
+
+    # ------------------------------------------------------
+    # DATAFRAME
+    # ------------------------------------------------------
+
+    df = pd.DataFrame(
+        lista
+    )
+
+
+    # ------------------------------------------------------
+    # CONVERSÕES
+    # ------------------------------------------------------
+
+    if "metricFOB" in df.columns:
+
+        df["metricFOB"] = pd.to_numeric(
+            df["metricFOB"],
+            errors="coerce"
+        )
+
+
+    if "metricKG" in df.columns:
+
+        df["metricKG"] = pd.to_numeric(
+            df["metricKG"],
+            errors="coerce"
+        )
+
+
+    # ------------------------------------------------------
+    # RENOMEAR
+    # ------------------------------------------------------
+
+    df = df.rename(
+        columns={
+            "year": "Ano",
+            "month": "Mês",
+            "country": "País",
+            "state": "UF",
+            "city": "Município",
+            "heading": "SH4",
+            "metricFOB": "FOB (US$)",
+            "metricKG": "Kg líquido"
+        }
+    )
+
+
+    # ------------------------------------------------------
+    # CÁLCULOS
+    # ------------------------------------------------------
+
+    if (
+        "FOB (US$)" in df.columns
+        and "Kg líquido" in df.columns
+    ):
+
+        kg = df[
+            "Kg líquido"
+        ].replace(
+            0,
+            pd.NA
+        )
+
+
+        # US$/KG
+
+        df["US$/kg"] = (
+            df["FOB (US$)"]
+            / kg
+        )
+
+
+        # US$/TON
+
+        df["US$/ton"] = (
+            df["FOB (US$)"]
+            / kg
             * 1000
         )
 
-    else:
 
-        avg = None
+        # CONTÊINERES
+        # 1 contêiner = 23.000 kg
 
-
-    # =====================================================
-    # RESUMO
-    # =====================================================
-
-    a, b, c, d = st.columns(4)
-
-
-    # FOB
-    a.metric(
-        "FOB total",
-
-        f"US$ {total_fob:,.2f}"
-        .replace(",", "X")
-        .replace(".", ",")
-        .replace("X", ".")
-    )
-
-
-    # KG
-    b.metric(
-        "Kg líquido",
-
-        f"{total_kg:,.2f}"
-        .replace(",", "X")
-        .replace(".", ",")
-        .replace("X", ".")
-    )
-
-
-    # US$/TON
-    c.metric(
-
-        "US$/ton",
-
-        "-"
-        if avg is None
-        else
-        (
-            f"US$ {avg:,.4f}"
-            .replace(",", "X")
-            .replace(".", ",")
-            .replace("X", ".")
+        df["Contêineres"] = (
+            df["Kg líquido"]
+            / PESO_CONTAINER
         )
+
+
+    # ------------------------------------------------------
+    # TOTALIZADORES
+    # ------------------------------------------------------
+
+    total_fob = 0
+    total_kg = 0
+
+
+    if "FOB (US$)" in df.columns:
+
+        total_fob = (
+            df["FOB (US$)"]
+            .sum()
+        )
+
+
+    if "Kg líquido" in df.columns:
+
+        total_kg = (
+            df["Kg líquido"]
+            .sum()
+        )
+
+
+    total_containers = (
+        total_kg
+        / PESO_CONTAINER
     )
 
 
-    # CONTÊINERES
-    total_container = (
-        total_kg / 23000
-        if total_kg
+    us_ton = (
+
+        total_fob
+        / total_kg
+        * 1000
+
+        if total_kg > 0
+
         else 0
     )
 
 
-    d.metric(
-        "Contêineres",
-        f"{total_container:,.2f}"
-        .replace(",", "X")
-        .replace(".", ",")
-        .replace("X", ".")
+    # ======================================================
+    # CARDS
+    # ======================================================
+
+    st.subheader(
+        "📊 Resumo da consulta"
     )
 
 
-    # =====================================================
+    c1, c2, c3, c4 = st.columns(4)
+
+
+    c1.metric(
+        "💵 FOB",
+        f"US$ {total_fob:,.2f}"
+    )
+
+
+    c2.metric(
+        "⚖️ Kg líquido",
+        f"{total_kg:,.0f}"
+    )
+
+
+    c3.metric(
+        "🚢 Contêineres",
+        f"{total_containers:,.2f}"
+    )
+
+
+    c4.metric(
+        "💰 US$/ton",
+        f"US$ {us_ton:,.2f}"
+    )
+
+
+    # ======================================================
     # TABELA
-    # =====================================================
+    # ======================================================
 
     st.subheader(
-        "📋 Resultado da consulta"
+        "📋 Resultado"
     )
 
 
     st.dataframe(
         df,
-        width="stretch",
+        use_container_width=True,
         hide_index=True
     )
 
 
-    # =====================================================
-    # DOWNLOAD CSV
-    # =====================================================
+    # ======================================================
+    # DOWNLOAD
+    # ======================================================
 
-    csv = (
-        df
-        .to_csv(index=False)
-        .encode("utf-8-sig")
+    csv = df.to_csv(
+        index=False
+    ).encode(
+        "utf-8-sig"
     )
 
 
     st.download_button(
+        "⬇️ Baixar CSV",
 
-        "📥 Baixar CSV",
+        data=csv,
 
-        csv,
+        file_name=
+            "comex_resultado.csv",
 
-        "comex_resultado.csv",
+        mime=
+            "text/csv",
 
-        "text/csv"
+        use_container_width=True
     )
 
 
-    # =====================================================
-    # DOWNLOAD EXCEL
-    # =====================================================
+else:
 
-    xlsx_path = "comex_resultado.xlsx"
-
-
-    df.to_excel(
-        xlsx_path,
-        index=False
+    st.info(
+        "👈 Selecione os filtros e clique "
+        "em **CONSULTAR**."
     )
 
 
-    with open(
-        xlsx_path,
-        "rb"
-    ) as f:
+# ==========================================================
+# RODAPÉ
+# ==========================================================
 
-        st.download_button(
-
-            "⬇️ Baixar Excel",
-
-            f.read(),
-
-            "comex_resultado.xlsx",
-
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+st.caption(
+    "Fonte: Comex Stat / MDIC — "
+    "API oficial. Contêiner = 23.000 kg."
+)
